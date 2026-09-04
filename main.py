@@ -69,6 +69,23 @@ def parse_proxy(proxy_url):
         return None
 
 # ===== hCaptcha 处理（带模型使用确认）=====
+class UnavailableModelError(RuntimeError):
+    """模型不可用时终止所有无效重试。"""
+
+
+def is_unavailable_model_error(error):
+    messages = []
+    current = error
+    while current is not None and current not in messages:
+        messages.append(current)
+        current = current.__cause__ or current.__context__
+
+    details = " ".join(str(item) for item in messages).lower()
+    unavailable_status = "404" in details or "not_found" in details or "not found" in details
+    model_context = "gemini" in details or "model" in details
+    return unavailable_status and model_context
+
+
 async def solve_hcaptcha(page):
     """
     尝试解决页面上的 hCaptcha 验证
@@ -131,6 +148,12 @@ async def solve_hcaptcha(page):
         print("    请安装: pip install hcaptcha_challenger")
         return False
     except Exception as e:
+        if is_unavailable_model_error(e):
+            print("❌ Gemini 模型不可用，终止本次任务。")
+            print(f"    上游错误: {type(e).__name__}: {e}")
+            print("    hcaptcha_challenger 返回了 404/NOT_FOUND；继续重试不会成功。")
+            print("    AgentConfig 中配置的模型可能被库忽略，请检查库实际调用的模型及其可用性。")
+            raise UnavailableModelError("hcaptcha_challenger 调用的 Gemini 模型不可用") from e
         print(f"⚠️  hCaptcha 处理出错: {type(e).__name__}: {e}")
         import traceback
         traceback.print_exc()
@@ -305,6 +328,8 @@ async def check_button_and_solve_hcaptcha(page, max_retries=3):
                 print("  ℹ️  按钮处于 disabled 状态（其他原因）")
                 return False
         except Exception as e:
+            if isinstance(e, UnavailableModelError):
+                raise
             print(f"  ⚠️  检查按钮状态失败: {e}")
             return False
     
@@ -488,4 +513,8 @@ async def main():
         await browser.close()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except UnavailableModelError as e:
+        print(f"\n❌ 任务失败: {e}")
+        raise SystemExit(1) from e
